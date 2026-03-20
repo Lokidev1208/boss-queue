@@ -72,13 +72,43 @@
     });
 
     // ── ETA ───────────────────────────────────────────────────────
+    // Công thức: lượt đầu tiên trước mình = 20 phút
+    //            mỗi lượt thêm = +4 phút
+    // Ví dụ: còn 1 người chờ = ~20ph | 2 người = ~24ph | 3 người = ~28ph
+    // Khi Firebase học đủ >=5 mẫu thực → blend 50/50 với data thực tế
+    const BASE_FIRST_MS = 20 * 60 * 1000;  // 20 phút lượt ngay trước
+    const EXTRA_MS      =  4 * 60 * 1000;  // +4 phút mỗi lượt xa hơn
+    let sampleCountLocal = 0;
+
+    onValue(ref(db, "queue/sampleCount"), s => { sampleCountLocal = s.val() ?? 0; });
+
+    function calcTurnMs(turnIndex) {
+      // turnIndex 0 = lượt ngay trước mình (20ph), 1 = lượt kế (24ph), ...
+      const formulaMs = BASE_FIRST_MS + turnIndex * EXTRA_MS;
+      if (sampleCountLocal >= 5) {
+        return Math.round((formulaMs + avgServeMs) / 2);
+      }
+      return formulaMs;
+    }
+
     function calcRemainingMs() {
       if (myNumber === null) return null;
       const turnsLeft = myNumber - currentServing;
       if (turnsLeft <= 0) return 0;
-      const totalMs = turnsLeft * avgServeMs;
+      let totalMs = 0;
+      for (let i = 0; i < turnsLeft; i++) {
+        totalMs += calcTurnMs(i);
+      }
       const elapsed = lastNextTs ? Math.max(0, Date.now() - lastNextTs) : 0;
       return Math.max(0, totalMs - elapsed);
+    }
+
+    function calcFullMs() {
+      if (myNumber === null) return 1;
+      const turnsLeft = myNumber - currentServing;
+      let total = 0;
+      for (let i = 0; i < turnsLeft; i++) total += calcTurnMs(i);
+      return total || 1;
     }
 
     function refreshETA() {
@@ -89,7 +119,7 @@
         const ms = calcRemainingMs();
         if (ms <= 0) { clearInterval(countdownTimer); return; }
         renderETA(ms);
-      }, 1000);
+      }, 60000); // cập nhật mỗi phút thôi, không đếm giây
     }
 
     function renderETA(ms) {
@@ -101,12 +131,12 @@
       } else if (mins > 0) {
         display = `~${mins} phút`;
       } else {
-        display = "Dưới 1 phút!";
+        display = "Sắp đến lượt!";
       }
       document.getElementById("eta-display").textContent = display;
       document.getElementById("eta-block").style.display = "block";
-      const fullMs = (myNumber - currentServing) * avgServeMs;
-      const pct = fullMs > 0 ? Math.max(0, Math.min(100, (1 - ms / fullMs) * 100)) : 100;
+      const fullMs = calcFullMs();
+      const pct = Math.max(0, Math.min(100, (1 - ms / fullMs) * 100));
       document.getElementById("eta-bar-fill").style.width = pct + "%";
       const hue = Math.round(120 * (ms / fullMs));
       document.getElementById("eta-bar-fill").style.background = `hsl(${hue},90%,50%)`;
