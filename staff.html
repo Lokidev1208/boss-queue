@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BOSS — Màn hình nhân viên</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Oswald:wght@400;600;700&family=Inter:wght@400;500&display=swap" rel="stylesheet" />
+
+  <!-- Firebase -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { getDatabase, ref, onValue, set, get } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+    // ── PASTE YOUR FIREBASE CONFIG HERE ──────────────────────────
+    const firebaseConfig = {
+      apiKey: "AIzaSyAQLc1i9plJ_Y0DqPs0Lr47HPZfXdGEfa0",
+      authDomain: "boss-7a41b.firebaseapp.com",
+      databaseURL: "https://boss-7a41b-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId: "boss-7a41b",
+      storageBucket: "boss-7a41b.firebasestorage.app",
+      messagingSenderId: "832592722413",
+      appId: "1:832592722413:web:917c4cc612ad37d7b88fe4"
+    };
+    // ─────────────────────────────────────────────────────────────
+
+    // ── ĐỔI MẬT KHẨU Ở ĐÂY ──────────────────────────────────────
+    const STAFF_PASSWORD = "boss2026";
+    // ─────────────────────────────────────────────────────────────
+
+    const app = initializeApp(firebaseConfig);
+    const db  = getDatabase(app);
+
+    const stateRef   = ref(db, "queue/state");
+    const counterRef = ref(db, "queue/nextTicket");
+    const currentRef = ref(db, "queue/currentServing");
+
+    let isOpen = true;
+    let currentServing = 0;
+    let nextTicket = 0;
+
+    // ── Login ─────────────────────────────────────────────────────
+    window.checkPassword = function () {
+      const input = document.getElementById("pw-input").value;
+      if (input === STAFF_PASSWORD) {
+        document.getElementById("login-screen").style.display = "none";
+        document.getElementById("staff-panel").style.display  = "flex";
+        initListeners();
+      } else {
+        document.getElementById("pw-error").style.display = "block";
+        document.getElementById("pw-input").value = "";
+        document.getElementById("pw-input").focus();
+      }
+    };
+
+    document.addEventListener("keydown", e => {
+      if (e.key === "Enter" && document.getElementById("login-screen").style.display !== "none") {
+        window.checkPassword();
+      }
+    });
+
+    // ── Live listeners ────────────────────────────────────────────
+    function initListeners() {
+      onValue(stateRef, snap => {
+        isOpen = snap.val() !== false;
+        updateToggleUI();
+      });
+
+      onValue(currentRef, snap => {
+        currentServing = snap.val() ?? 0;
+        document.getElementById("current-display").textContent = String(currentServing).padStart(2, "0");
+        updateWaiting();
+      });
+
+      onValue(counterRef, snap => {
+        nextTicket = snap.val() ?? 0;
+        document.getElementById("next-display").textContent = String(nextTicket).padStart(2, "0");
+        updateWaiting();
+      });
+    }
+
+    function updateWaiting() {
+      const waiting = Math.max(0, nextTicket - currentServing);
+      document.getElementById("waiting-count").textContent = waiting;
+      document.getElementById("next-btn").disabled = waiting === 0;
+    }
+
+    function updateToggleUI() {
+      const btn = document.getElementById("toggle-btn");
+      const badge = document.getElementById("state-badge");
+      if (isOpen) {
+        btn.textContent = "🔴 TẮT NHẬN SỐ";
+        btn.className = "action-btn danger";
+        badge.textContent = "🟢 ĐANG NHẬN KHÁCH";
+        badge.className = "state-badge open";
+      } else {
+        btn.textContent = "🟢 BẬT NHẬN SỐ";
+        btn.className = "action-btn success";
+        badge.textContent = "🔴 ĐÃ TẮT NHẬN SỐ";
+        badge.className = "state-badge closed";
+      }
+    }
+
+    // ── Actions ───────────────────────────────────────────────────
+    window.nextNumber = async function () {
+      const ticketSnap = await get(counterRef);
+      const total = ticketSnap.val() ?? 0;
+      if (currentServing < total) {
+        await set(currentRef, currentServing + 1);
+        flash("next-btn");
+      }
+    };
+
+    window.toggleQueue = async function () {
+      await set(stateRef, !isOpen);
+    };
+
+    window.resetQueue = async function () {
+      if (!confirm("Reset toàn bộ hàng chờ? Hành động này không thể hoàn tác!")) return;
+      await set(currentRef, 0);
+      await set(counterRef, 0);
+      flash("reset-btn");
+    };
+
+    function flash(id) {
+      const el = document.getElementById(id);
+      el.style.transform = "scale(0.95)";
+      setTimeout(() => { el.style.transform = ""; }, 150);
+    }
+  </script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --gold:  #ffee04;
+      --black: #000000;
+      --dark:  #0d0d0d;
+      --gray:  #1a1a1a;
+      --gray2: #242424;
+    }
+
+    body {
+      background: var(--dark);
+      color: #fff;
+      font-family: 'Inter', sans-serif;
+      min-height: 100vh;
+      position: relative;
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      background-image:
+        repeating-linear-gradient(45deg, transparent, transparent 40px, rgba(255,238,4,0.015) 40px, rgba(255,238,4,0.015) 80px);
+      pointer-events: none;
+    }
+
+    /* ─── Login screen ─────────────────────────────────────────── */
+    #login-screen {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .login-box {
+      background: var(--gray);
+      border: 1px solid rgba(255,238,4,0.2);
+      border-radius: 20px;
+      padding: 40px 32px;
+      width: 100%;
+      max-width: 380px;
+      text-align: center;
+    }
+
+    .login-logo {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 52px;
+      color: var(--gold);
+      letter-spacing: 4px;
+    }
+
+    .login-sub {
+      font-family: 'Oswald', sans-serif;
+      font-size: 11px;
+      letter-spacing: 3px;
+      color: rgba(255,255,255,0.4);
+      margin-bottom: 32px;
+      text-transform: uppercase;
+    }
+
+    .login-label {
+      font-family: 'Oswald', sans-serif;
+      font-size: 12px;
+      letter-spacing: 2px;
+      color: rgba(255,255,255,0.5);
+      text-transform: uppercase;
+      margin-bottom: 10px;
+      text-align: left;
+    }
+
+    #pw-input {
+      width: 100%;
+      background: var(--black);
+      border: 1px solid rgba(255,238,4,0.2);
+      border-radius: 10px;
+      color: #fff;
+      font-family: 'Oswald', sans-serif;
+      font-size: 18px;
+      letter-spacing: 4px;
+      padding: 14px 16px;
+      outline: none;
+      text-align: center;
+      transition: border-color 0.2s;
+    }
+    #pw-input:focus { border-color: var(--gold); }
+
+    #pw-error {
+      display: none;
+      color: #ff4444;
+      font-size: 13px;
+      margin-top: 10px;
+      font-family: 'Oswald', sans-serif;
+      letter-spacing: 1px;
+    }
+
+    .login-btn {
+      margin-top: 20px;
+      width: 100%;
+      padding: 16px;
+      background: var(--gold);
+      color: var(--black);
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 20px;
+      letter-spacing: 3px;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    .login-btn:hover { opacity: 0.9; }
+
+    /* ─── Staff panel ──────────────────────────────────────────── */
+    #staff-panel {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px 16px 48px;
+      min-height: 100vh;
+    }
+
+    .panel-header {
+      width: 100%;
+      max-width: 560px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 24px;
+    }
+
+    .panel-title {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 28px;
+      color: var(--gold);
+      letter-spacing: 3px;
+    }
+
+    .panel-sub {
+      font-family: 'Oswald', sans-serif;
+      font-size: 11px;
+      letter-spacing: 2px;
+      color: rgba(255,255,255,0.35);
+      text-transform: uppercase;
+    }
+
+    .state-badge {
+      font-family: 'Oswald', sans-serif;
+      font-size: 12px;
+      letter-spacing: 1px;
+      padding: 6px 14px;
+      border-radius: 99px;
+    }
+    .state-badge.open   { background: rgba(0,200,80,0.15); color: #00e066; border: 1px solid #00e06640; }
+    .state-badge.closed { background: rgba(255,50,50,0.15); color: #ff4444; border: 1px solid #ff444440; }
+
+    /* Stats */
+    .stats-row {
+      width: 100%;
+      max-width: 560px;
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+
+    .stat-card {
+      background: var(--gray);
+      border: 1px solid rgba(255,238,4,0.1);
+      border-radius: 14px;
+      padding: 20px 12px;
+      text-align: center;
+    }
+
+    .stat-label {
+      font-family: 'Oswald', sans-serif;
+      font-size: 10px;
+      letter-spacing: 2px;
+      color: rgba(255,255,255,0.35);
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    .stat-value {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: clamp(36px, 10vw, 56px);
+      line-height: 1;
+      letter-spacing: 2px;
+    }
+
+    .stat-value.gold  { color: var(--gold); }
+    .stat-value.white { color: #fff; }
+    .stat-value.dim   { color: rgba(255,255,255,0.4); }
+
+    /* Main action */
+    .main-section {
+      width: 100%;
+      max-width: 560px;
+    }
+
+    .section-title {
+      font-family: 'Oswald', sans-serif;
+      font-size: 11px;
+      letter-spacing: 3px;
+      color: rgba(255,255,255,0.3);
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+
+    .action-btn {
+      display: block;
+      width: 100%;
+      padding: 22px;
+      border: none;
+      border-radius: 14px;
+      cursor: pointer;
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: clamp(22px, 6vw, 30px);
+      letter-spacing: 3px;
+      transition: transform 0.1s, box-shadow 0.2s, opacity 0.2s;
+      margin-bottom: 12px;
+    }
+    .action-btn:active { transform: scale(0.97); }
+    .action-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+    .action-btn.primary {
+      background: var(--gold);
+      color: var(--black);
+      box-shadow: 0 6px 30px rgba(255,238,4,0.3);
+    }
+    .action-btn.primary:hover:not(:disabled) {
+      box-shadow: 0 10px 40px rgba(255,238,4,0.45);
+      transform: translateY(-2px);
+    }
+
+    .action-btn.danger {
+      background: var(--gray2);
+      color: #ff6b6b;
+      border: 1px solid rgba(255,107,107,0.3);
+    }
+    .action-btn.danger:hover { background: rgba(255,60,60,0.12); }
+
+    .action-btn.success {
+      background: var(--gray2);
+      color: #00e066;
+      border: 1px solid rgba(0,224,102,0.3);
+    }
+    .action-btn.success:hover { background: rgba(0,200,80,0.1); }
+
+    .action-btn.reset {
+      background: transparent;
+      color: rgba(255,255,255,0.25);
+      border: 1px solid rgba(255,255,255,0.1);
+      font-size: clamp(14px, 4vw, 18px);
+      padding: 14px;
+      letter-spacing: 2px;
+    }
+    .action-btn.reset:hover { color: rgba(255,255,255,0.5); border-color: rgba(255,255,255,0.25); }
+
+    .sep { height: 1px; background: rgba(255,255,255,0.06); margin: 20px 0; }
+
+    /* Mobile tap hint */
+    .tap-hint {
+      text-align: center;
+      font-size: 12px;
+      color: rgba(255,255,255,0.18);
+      margin-top: 24px;
+      font-family: 'Oswald', sans-serif;
+      letter-spacing: 1px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Login Screen -->
+  <div id="login-screen">
+    <div class="login-box">
+      <div class="login-logo">BOSS</div>
+      <div class="login-sub">Staff Access · Nhân viên</div>
+      <div class="login-label">Mật khẩu</div>
+      <input type="password" id="pw-input" placeholder="••••••••" autocomplete="off" />
+      <div id="pw-error">❌ Sai mật khẩu, thử lại!</div>
+      <button class="login-btn" onclick="checkPassword()">VÀO TRANG QUẢN LÝ</button>
+    </div>
+  </div>
+
+  <!-- Staff Panel -->
+  <div id="staff-panel">
+    <div class="panel-header">
+      <div>
+        <div class="panel-title">BOSS STAFF</div>
+        <div class="panel-sub">Quản lý hàng chờ</div>
+      </div>
+      <div id="state-badge" class="state-badge open">🟢 ĐANG NHẬN KHÁCH</div>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-label">Đang phục vụ</div>
+        <div class="stat-value gold" id="current-display">00</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Đang chờ</div>
+        <div class="stat-value white" id="waiting-count">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Tổng đã lấy</div>
+        <div class="stat-value dim" id="next-display">00</div>
+      </div>
+    </div>
+
+    <!-- Actions -->
+    <div class="main-section">
+      <div class="section-title">Hành động</div>
+
+      <button class="action-btn primary" id="next-btn" onclick="nextNumber()">
+        ➡️ &nbsp; GỌI SỐ TIẾP THEO
+      </button>
+
+      <button class="action-btn danger" id="toggle-btn" onclick="toggleQueue()">
+        🔴 TẮT NHẬN SỐ
+      </button>
+
+      <div class="sep"></div>
+
+      <button class="action-btn reset" id="reset-btn" onclick="resetQueue()">
+        🔄 &nbsp; RESET HÀNG CHỜ (về 0)
+      </button>
+    </div>
+
+    <p class="tap-hint">Nhấn "GỌI SỐ TIẾP THEO" mỗi khi một bàn sẵn sàng</p>
+  </div>
+
+</body>
+</html>

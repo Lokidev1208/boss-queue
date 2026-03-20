@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BOSS Coffee & Kitchen — Lấy số thứ tự</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Oswald:wght@400;600;700&family=Inter:wght@400;500&display=swap" rel="stylesheet" />
+
+  <!-- Firebase -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { getDatabase, ref, onValue, runTransaction, get } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+    // ── PASTE YOUR FIREBASE CONFIG HERE ──────────────────────────
+    const firebaseConfig = {
+      apiKey: "AIzaSyAQLc1i9plJ_Y0DqPs0Lr47HPZfXdGEfa0",
+      authDomain: "boss-7a41b.firebaseapp.com",
+      databaseURL: "https://boss-7a41b-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId: "boss-7a41b",
+      storageBucket: "boss-7a41b.firebasestorage.app",
+      messagingSenderId: "832592722413",
+      appId: "1:832592722413:web:917c4cc612ad37d7b88fe4"
+    };
+    // ─────────────────────────────────────────────────────────────
+
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
+
+    const stateRef  = ref(db, "queue/state");
+    const counterRef = ref(db, "queue/nextTicket");
+    const currentRef = ref(db, "queue/currentServing");
+
+    let myNumber = null;
+
+    // ── Live listeners ────────────────────────────────────────────
+    onValue(stateRef, snap => {
+      const open = snap.val() !== false;
+      document.getElementById("status-badge").textContent = open ? "🟢 Đang nhận khách" : "🔴 Tạm ngừng nhận số";
+      document.getElementById("status-badge").className = "status-badge " + (open ? "open" : "closed");
+      document.getElementById("take-btn").disabled = !open;
+      document.getElementById("closed-msg").style.display = open ? "none" : "block";
+    });
+
+    onValue(currentRef, snap => {
+      const cur = snap.val() ?? 0;
+      document.getElementById("current-number").textContent = String(cur).padStart(2, "0");
+      if (myNumber !== null) {
+        const wait = myNumber - cur;
+        document.getElementById("wait-count").textContent = wait > 0 ? wait : 0;
+        document.getElementById("my-ticket-section").style.display = "block";
+        if (wait <= 0) {
+          document.getElementById("your-turn-banner").style.display = "flex";
+          playBell();
+        } else {
+          document.getElementById("your-turn-banner").style.display = "none";
+        }
+      }
+    });
+
+    // ── Take a number ─────────────────────────────────────────────
+    async function takeNumber() {
+      const stateSnap = await get(stateRef);
+      if (stateSnap.val() === false) return;
+
+      const btn = document.getElementById("take-btn");
+      btn.disabled = true;
+      btn.textContent = "Đang xử lý...";
+
+      runTransaction(counterRef, current => (current || 0) + 1)
+        .then(result => {
+          myNumber = result.snapshot.val();
+          document.getElementById("my-number").textContent = String(myNumber).padStart(2, "0");
+          document.getElementById("my-ticket-section").style.display = "block";
+          document.getElementById("take-btn").style.display = "none";
+          document.getElementById("closed-msg").style.display = "none";
+          triggerConfetti();
+        })
+        .catch(() => {
+          btn.disabled = false;
+          btn.textContent = "Lấy số thứ tự";
+        });
+    }
+
+    window.takeNumber = takeNumber;
+
+    // ── Confetti ──────────────────────────────────────────────────
+    function triggerConfetti() {
+      const colors = ["#ffee04", "#000000", "#fff"];
+      for (let i = 0; i < 60; i++) {
+        const el = document.createElement("div");
+        el.className = "confetti-piece";
+        el.style.cssText = `
+          left:${Math.random()*100}vw;
+          background:${colors[Math.floor(Math.random()*colors.length)]};
+          animation-delay:${Math.random()*0.8}s;
+          animation-duration:${0.8 + Math.random()*0.8}s;
+          width:${6+Math.random()*6}px;
+          height:${6+Math.random()*6}px;
+          border-radius:${Math.random()>0.5?"50%":"2px"};
+        `;
+        document.body.appendChild(el);
+        el.addEventListener("animationend", () => el.remove());
+      }
+    }
+
+    function playBell() {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.frequency.value = 880;
+        gain.gain.setValueAtTime(0.4, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.2);
+        osc.start(); osc.stop(ctx.currentTime + 1.2);
+      } catch(e) {}
+    }
+  </script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --gold: #ffee04;
+      --black: #000000;
+      --dark: #0d0d0d;
+      --gray: #1a1a1a;
+    }
+
+    body {
+      background: var(--dark);
+      color: #fff;
+      font-family: 'Inter', sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 0 16px 40px;
+      position: relative;
+      overflow-x: hidden;
+    }
+
+    /* Background texture */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        repeating-linear-gradient(45deg, transparent, transparent 40px, rgba(255,238,4,0.02) 40px, rgba(255,238,4,0.02) 80px);
+      pointer-events: none;
+    }
+
+    /* Header */
+    .header {
+      width: 100%;
+      max-width: 480px;
+      text-align: center;
+      padding: 36px 0 24px;
+    }
+
+    .logo-text {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: clamp(52px, 14vw, 80px);
+      color: var(--gold);
+      letter-spacing: 6px;
+      line-height: 1;
+      text-shadow: 4px 4px 0 rgba(255,238,4,0.15);
+    }
+
+    .sub-text {
+      font-family: 'Oswald', sans-serif;
+      font-size: clamp(11px, 3vw, 14px);
+      letter-spacing: 4px;
+      color: rgba(255,255,255,0.5);
+      text-transform: uppercase;
+      margin-top: 4px;
+    }
+
+    .divider {
+      width: 60px; height: 3px;
+      background: var(--gold);
+      margin: 16px auto;
+    }
+
+    /* Status badge */
+    .status-badge {
+      display: inline-block;
+      font-family: 'Oswald', sans-serif;
+      font-size: 13px;
+      letter-spacing: 1px;
+      padding: 6px 16px;
+      border-radius: 99px;
+      margin-bottom: 8px;
+    }
+    .status-badge.open   { background: rgba(0,200,80,0.15); color: #00e066; border: 1px solid #00e06640; }
+    .status-badge.closed { background: rgba(255,50,50,0.15); color: #ff4444; border: 1px solid #ff444440; }
+
+    /* Main card */
+    .card {
+      background: var(--gray);
+      border: 1px solid rgba(255,238,4,0.15);
+      border-radius: 20px;
+      width: 100%;
+      max-width: 480px;
+      padding: 32px 28px;
+      margin-top: 8px;
+    }
+
+    .card-label {
+      font-family: 'Oswald', sans-serif;
+      font-size: 11px;
+      letter-spacing: 3px;
+      color: rgba(255,255,255,0.4);
+      text-transform: uppercase;
+      text-align: center;
+      margin-bottom: 8px;
+    }
+
+    .current-block {
+      text-align: center;
+      background: rgba(0,0,0,0.4);
+      border-radius: 14px;
+      padding: 20px 16px;
+      margin-bottom: 24px;
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .current-number {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: clamp(64px, 18vw, 96px);
+      color: #fff;
+      line-height: 1;
+      letter-spacing: 4px;
+    }
+
+    /* Take number button */
+    .take-btn {
+      display: block;
+      width: 100%;
+      padding: 20px;
+      background: var(--gold);
+      color: var(--black);
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: clamp(22px, 6vw, 28px);
+      letter-spacing: 3px;
+      border: none;
+      border-radius: 14px;
+      cursor: pointer;
+      transition: transform 0.1s, box-shadow 0.2s;
+      box-shadow: 0 6px 30px rgba(255,238,4,0.3);
+    }
+    .take-btn:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 40px rgba(255,238,4,0.45);
+    }
+    .take-btn:active:not(:disabled) { transform: translateY(0); }
+    .take-btn:disabled {
+      background: #333;
+      color: #666;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+
+    .closed-msg {
+      text-align: center;
+      margin-top: 16px;
+      font-family: 'Oswald', sans-serif;
+      color: #ff4444;
+      font-size: 14px;
+      letter-spacing: 1px;
+      display: none;
+    }
+
+    /* My ticket */
+    #my-ticket-section {
+      display: none;
+      margin-top: 20px;
+    }
+
+    .ticket-card {
+      background: var(--black);
+      border: 2px solid var(--gold);
+      border-radius: 16px;
+      padding: 24px 20px;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .ticket-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, transparent, var(--gold), transparent);
+    }
+
+    .ticket-label {
+      font-family: 'Oswald', sans-serif;
+      font-size: 11px;
+      letter-spacing: 3px;
+      color: rgba(255,238,4,0.6);
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    .my-number {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: clamp(72px, 20vw, 110px);
+      color: var(--gold);
+      line-height: 1;
+      letter-spacing: 6px;
+      text-shadow: 0 0 40px rgba(255,238,4,0.4);
+    }
+
+    .wait-info {
+      margin-top: 12px;
+      font-family: 'Oswald', sans-serif;
+      font-size: 15px;
+      color: rgba(255,255,255,0.6);
+      letter-spacing: 0.5px;
+    }
+
+    .wait-info strong {
+      color: #fff;
+      font-size: 20px;
+    }
+
+    /* Your turn banner */
+    #your-turn-banner {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      margin-top: 14px;
+      background: var(--gold);
+      color: var(--black);
+      border-radius: 10px;
+      padding: 14px 20px;
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: clamp(18px, 5vw, 22px);
+      letter-spacing: 2px;
+      animation: pulse 1s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(255,238,4,0.4); }
+      50%       { box-shadow: 0 0 0 12px rgba(255,238,4,0); }
+    }
+
+    /* Note */
+    .note {
+      text-align: center;
+      margin-top: 20px;
+      font-size: 12px;
+      color: rgba(255,255,255,0.25);
+      line-height: 1.6;
+    }
+
+    /* Confetti */
+    .confetti-piece {
+      position: fixed;
+      top: -10px;
+      animation: confetti-fall linear forwards;
+      pointer-events: none;
+      z-index: 999;
+    }
+    @keyframes confetti-fall {
+      from { transform: translateY(-10px) rotate(0deg); opacity: 1; }
+      to   { transform: translateY(100vh) rotate(720deg); opacity: 0; }
+    }
+
+    /* Footer */
+    .footer {
+      margin-top: 32px;
+      font-family: 'Oswald', sans-serif;
+      font-size: 11px;
+      letter-spacing: 2px;
+      color: rgba(255,255,255,0.15);
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="logo-text">BOSS</div>
+    <div class="sub-text">Coffee &amp; Kitchen · Since 2021</div>
+    <div class="divider"></div>
+    <div id="status-badge" class="status-badge open">🟢 Đang nhận khách</div>
+  </div>
+
+  <div class="card">
+    <div class="current-block">
+      <div class="card-label">Đang phục vụ số</div>
+      <div class="current-number" id="current-number">00</div>
+    </div>
+
+    <button class="take-btn" id="take-btn" onclick="takeNumber()">
+      🎫 &nbsp;LẤY SỐ THỨ TỰ
+    </button>
+    <div class="closed-msg" id="closed-msg">
+      ⚠️ Quán tạm ngừng nhận số mới. Vui lòng thử lại sau!
+    </div>
+
+    <div id="my-ticket-section">
+      <div class="ticket-card">
+        <div class="ticket-label">Số của bạn</div>
+        <div class="my-number" id="my-number">—</div>
+        <div class="wait-info">
+          Còn <strong id="wait-count">—</strong> số trước bạn
+        </div>
+        <div id="your-turn-banner">
+          🎉 &nbsp;ĐẾN LƯỢT BẠN RỒI! &nbsp;🎉
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p class="note">
+    Giữ trang này mở để nhận thông báo tự động<br />
+    khi đến lượt bạn · Không cần tải lại trang
+  </p>
+
+  <div class="footer">BOSS COFFEE & KITCHEN · HỆ THỐNG XẾP HÀNG</div>
+
+</body>
+</html>
