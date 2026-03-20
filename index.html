@@ -7,10 +7,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Oswald:wght@400;600;700&family=Inter:wght@400;500&display=swap" rel="stylesheet" />
 
-  <!-- Firebase -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-    import { getDatabase, ref, onValue, runTransaction, get } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+    import { getDatabase, ref, onValue, runTransaction, get, set } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
     // ── PASTE YOUR FIREBASE CONFIG HERE ──────────────────────────
     const firebaseConfig = {
@@ -24,81 +23,151 @@
     };
     // ─────────────────────────────────────────────────────────────
 
+    const DEFAULT_MS = 30 * 60 * 1000;
+
     const app = initializeApp(firebaseConfig);
-    const db = getDatabase(app);
+    const db  = getDatabase(app);
 
-    const stateRef  = ref(db, "queue/state");
-    const counterRef = ref(db, "queue/nextTicket");
-    const currentRef = ref(db, "queue/currentServing");
+    const stateRef    = ref(db, "queue/state");
+    const counterRef  = ref(db, "queue/nextTicket");
+    const currentRef  = ref(db, "queue/currentServing");
+    const avgRef      = ref(db, "queue/avgServeMs");
+    const lastNextRef = ref(db, "queue/lastNextTimestamp");
 
-    let myNumber = null;
+    let myNumber       = null;
+    let currentServing = 0;
+    let avgServeMs     = DEFAULT_MS;
+    let lastNextTs     = null;
+    let countdownTimer = null;
 
     // ── Live listeners ────────────────────────────────────────────
     onValue(stateRef, snap => {
       const open = snap.val() !== false;
       document.getElementById("status-badge").textContent = open ? "🟢 Đang nhận khách" : "🔴 Tạm ngừng nhận số";
       document.getElementById("status-badge").className = "status-badge " + (open ? "open" : "closed");
-      document.getElementById("take-btn").disabled = !open;
+      document.getElementById("submit-btn").disabled = !open;
       document.getElementById("closed-msg").style.display = open ? "none" : "block";
     });
 
+    onValue(avgRef, snap => { if (snap.val()) avgServeMs = snap.val(); refreshETA(); });
+
+    onValue(lastNextRef, snap => { lastNextTs = snap.val() ?? null; refreshETA(); });
+
     onValue(currentRef, snap => {
-      const cur = snap.val() ?? 0;
-      document.getElementById("current-number").textContent = String(cur).padStart(2, "0");
+      currentServing = snap.val() ?? 0;
+      document.getElementById("current-number").textContent = String(currentServing).padStart(2, "0");
       if (myNumber !== null) {
-        const wait = myNumber - cur;
-        document.getElementById("wait-count").textContent = wait > 0 ? wait : 0;
-        document.getElementById("my-ticket-section").style.display = "block";
+        const wait = myNumber - currentServing;
+        document.getElementById("wait-count").textContent = Math.max(0, wait);
         if (wait <= 0) {
           document.getElementById("your-turn-banner").style.display = "flex";
+          document.getElementById("eta-block").style.display = "none";
+          clearInterval(countdownTimer);
           playBell();
         } else {
           document.getElementById("your-turn-banner").style.display = "none";
+          refreshETA();
         }
       }
     });
 
-    // ── Take a number ─────────────────────────────────────────────
-    async function takeNumber() {
+    // ── ETA ───────────────────────────────────────────────────────
+    function calcRemainingMs() {
+      if (myNumber === null) return null;
+      const turnsLeft = myNumber - currentServing;
+      if (turnsLeft <= 0) return 0;
+      const totalMs = turnsLeft * avgServeMs;
+      const elapsed = lastNextTs ? Math.max(0, Date.now() - lastNextTs) : 0;
+      return Math.max(0, totalMs - elapsed);
+    }
+
+    function refreshETA() {
+      if (myNumber === null || myNumber - currentServing <= 0) return;
+      clearInterval(countdownTimer);
+      renderETA(calcRemainingMs());
+      countdownTimer = setInterval(() => {
+        const ms = calcRemainingMs();
+        if (ms <= 0) { clearInterval(countdownTimer); return; }
+        renderETA(ms);
+      }, 1000);
+    }
+
+    function renderETA(ms) {
+      const mins = Math.floor(ms / 60000);
+      let display;
+      if (mins >= 60) {
+        const h = Math.floor(mins / 60), m = mins % 60;
+        display = `~${h} giờ${m > 0 ? " " + m + " phút" : ""}`;
+      } else if (mins > 0) {
+        display = `~${mins} phút`;
+      } else {
+        display = "Dưới 1 phút!";
+      }
+      document.getElementById("eta-display").textContent = display;
+      document.getElementById("eta-block").style.display = "block";
+      const fullMs = (myNumber - currentServing) * avgServeMs;
+      const pct = fullMs > 0 ? Math.max(0, Math.min(100, (1 - ms / fullMs) * 100)) : 100;
+      document.getElementById("eta-bar-fill").style.width = pct + "%";
+      const hue = Math.round(120 * (ms / fullMs));
+      document.getElementById("eta-bar-fill").style.background = `hsl(${hue},90%,50%)`;
+    }
+
+    // ── Submit form → take number ─────────────────────────────────
+    window.submitForm = async () => {
+      const name  = document.getElementById("inp-name").value.trim();
+      const phone = document.getElementById("inp-phone").value.trim();
+      const pax   = parseInt(document.getElementById("inp-pax").value) || 1;
+
+      if (!name) { shake("inp-name"); return; }
+      if (!phone || phone.length < 8) { shake("inp-phone"); return; }
+
       const stateSnap = await get(stateRef);
       if (stateSnap.val() === false) return;
 
-      const btn = document.getElementById("take-btn");
-      btn.disabled = true;
-      btn.textContent = "Đang xử lý...";
+      const btn = document.getElementById("submit-btn");
+      btn.disabled = true; btn.textContent = "Đang xử lý...";
 
-      runTransaction(counterRef, current => (current || 0) + 1)
-        .then(result => {
+      runTransaction(counterRef, c => (c || 0) + 1)
+        .then(async result => {
           myNumber = result.snapshot.val();
+
+          // Save guest info keyed by ticket number
+          await set(ref(db, `queue/guests/${myNumber}`), {
+            name, phone, pax,
+            ticket: myNumber,
+            time: Date.now()
+          });
+
+          // Show ticket, hide form
+          document.getElementById("form-section").style.display = "none";
           document.getElementById("my-number").textContent = String(myNumber).padStart(2, "0");
+          document.getElementById("guest-name-display").textContent = name;
+          document.getElementById("guest-pax-display").textContent = `${pax} người`;
           document.getElementById("my-ticket-section").style.display = "block";
-          document.getElementById("take-btn").style.display = "none";
-          document.getElementById("closed-msg").style.display = "none";
+          document.getElementById("wait-count").textContent = Math.max(0, myNumber - currentServing);
+          refreshETA();
           triggerConfetti();
         })
-        .catch(() => {
-          btn.disabled = false;
-          btn.textContent = "Lấy số thứ tự";
-        });
+        .catch(() => { btn.disabled = false; btn.textContent = "LẤY SỐ THỨ TỰ"; });
+    };
+
+    // Enter key on last field
+    window.handleEnter = e => { if (e.key === "Enter") window.submitForm(); };
+
+    function shake(id) {
+      const el = document.getElementById(id);
+      el.style.animation = "none";
+      el.offsetHeight;
+      el.style.animation = "shake 0.35s ease";
+      el.focus();
     }
 
-    window.takeNumber = takeNumber;
-
-    // ── Confetti ──────────────────────────────────────────────────
     function triggerConfetti() {
-      const colors = ["#ffee04", "#000000", "#fff"];
+      const colors = ["#ffee04","#ffffff","#000000"];
       for (let i = 0; i < 60; i++) {
         const el = document.createElement("div");
         el.className = "confetti-piece";
-        el.style.cssText = `
-          left:${Math.random()*100}vw;
-          background:${colors[Math.floor(Math.random()*colors.length)]};
-          animation-delay:${Math.random()*0.8}s;
-          animation-duration:${0.8 + Math.random()*0.8}s;
-          width:${6+Math.random()*6}px;
-          height:${6+Math.random()*6}px;
-          border-radius:${Math.random()>0.5?"50%":"2px"};
-        `;
+        el.style.cssText = `left:${Math.random()*100}vw;background:${colors[Math.floor(Math.random()*3)]};animation-delay:${Math.random()*0.8}s;animation-duration:${0.8+Math.random()*0.8}s;width:${6+Math.random()*6}px;height:${6+Math.random()*6}px;border-radius:${Math.random()>.5?"50%":"2px"};`;
         document.body.appendChild(el);
         el.addEventListener("animationend", () => el.remove());
       }
@@ -107,8 +176,7 @@
     function playBell() {
       try {
         const ctx = new (window.AudioContext || window.webkitAudioContext)();
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
+        const osc = ctx.createOscillator(), gain = ctx.createGain();
         osc.connect(gain); gain.connect(ctx.destination);
         osc.frequency.value = 880;
         gain.gain.setValueAtTime(0.4, ctx.currentTime);
@@ -119,271 +187,79 @@
   </script>
 
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    :root{--gold:#ffee04;--black:#000;--dark:#0d0d0d;--gray:#1a1a1a;--input-bg:#111}
+    body{background:var(--dark);color:#fff;font-family:'Inter',sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:0 16px 48px;overflow-x:hidden}
+    body::before{content:'';position:fixed;inset:0;background-image:repeating-linear-gradient(45deg,transparent,transparent 40px,rgba(255,238,4,.02) 40px,rgba(255,238,4,.02) 80px);pointer-events:none}
 
-    :root {
-      --gold: #ffee04;
-      --black: #000000;
-      --dark: #0d0d0d;
-      --gray: #1a1a1a;
-    }
+    .header{width:100%;max-width:480px;text-align:center;padding:32px 0 16px}
+    .logo-text{font-family:'Bebas Neue',sans-serif;font-size:clamp(48px,13vw,76px);color:var(--gold);letter-spacing:6px;line-height:1;text-shadow:4px 4px 0 rgba(255,238,4,.12)}
+    .sub-text{font-family:'Oswald',sans-serif;font-size:clamp(10px,2.5vw,13px);letter-spacing:4px;color:rgba(255,255,255,.4);text-transform:uppercase;margin-top:4px}
+    .divider{width:60px;height:3px;background:var(--gold);margin:12px auto}
+    .status-badge{display:inline-block;font-family:'Oswald',sans-serif;font-size:12px;letter-spacing:1px;padding:5px 14px;border-radius:99px}
+    .status-badge.open{background:rgba(0,200,80,.15);color:#00e066;border:1px solid rgba(0,224,102,.25)}
+    .status-badge.closed{background:rgba(255,50,50,.15);color:#ff4444;border:1px solid rgba(255,68,68,.25)}
 
-    body {
-      background: var(--dark);
-      color: #fff;
-      font-family: 'Inter', sans-serif;
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      padding: 0 16px 40px;
-      position: relative;
-      overflow-x: hidden;
-    }
+    .card{background:var(--gray);border:1px solid rgba(255,238,4,.15);border-radius:20px;width:100%;max-width:480px;padding:24px 20px;margin-top:10px}
+    .card-label{font-family:'Oswald',sans-serif;font-size:10px;letter-spacing:3px;color:rgba(255,255,255,.35);text-transform:uppercase;text-align:center;margin-bottom:8px}
+    .current-block{text-align:center;background:rgba(0,0,0,.4);border-radius:12px;padding:16px 12px;margin-bottom:20px;border:1px solid rgba(255,255,255,.05)}
+    .current-number{font-family:'Bebas Neue',sans-serif;font-size:clamp(56px,16vw,84px);color:#fff;line-height:1;letter-spacing:4px}
 
-    /* Background texture */
-    body::before {
-      content: '';
-      position: fixed;
-      inset: 0;
-      background-image:
-        repeating-linear-gradient(45deg, transparent, transparent 40px, rgba(255,238,4,0.02) 40px, rgba(255,238,4,0.02) 80px);
-      pointer-events: none;
+    /* ── Form ── */
+    #form-section{}
+    .form-title{font-family:'Oswald',sans-serif;font-size:11px;letter-spacing:3px;color:rgba(255,238,4,.55);text-transform:uppercase;margin-bottom:14px;text-align:center}
+    .field{margin-bottom:14px}
+    .field-label{font-family:'Oswald',sans-serif;font-size:11px;letter-spacing:2px;color:rgba(255,255,255,.45);text-transform:uppercase;margin-bottom:6px;display:block}
+    .field input, .field select{
+      width:100%;background:var(--input-bg);border:1px solid rgba(255,255,255,.1);
+      border-radius:10px;color:#fff;font-family:'Inter',sans-serif;font-size:15px;
+      padding:13px 14px;outline:none;transition:border-color .2s;
+      -webkit-appearance:none;appearance:none;
     }
+    .field input:focus, .field select:focus{border-color:var(--gold)}
+    .field input::placeholder{color:rgba(255,255,255,.2)}
+    .field select option{background:#1a1a1a;color:#fff}
 
-    /* Header */
-    .header {
-      width: 100%;
-      max-width: 480px;
-      text-align: center;
-      padding: 36px 0 24px;
-    }
+    @keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-6px)}40%,80%{transform:translateX(6px)}}
 
-    .logo-text {
-      font-family: 'Bebas Neue', sans-serif;
-      font-size: clamp(52px, 14vw, 80px);
-      color: var(--gold);
-      letter-spacing: 6px;
-      line-height: 1;
-      text-shadow: 4px 4px 0 rgba(255,238,4,0.15);
-    }
+    .closed-msg{text-align:center;margin-top:14px;font-family:'Oswald',sans-serif;color:#ff4444;font-size:13px;letter-spacing:1px;display:none}
 
-    .sub-text {
-      font-family: 'Oswald', sans-serif;
-      font-size: clamp(11px, 3vw, 14px);
-      letter-spacing: 4px;
-      color: rgba(255,255,255,0.5);
-      text-transform: uppercase;
-      margin-top: 4px;
-    }
+    .submit-btn{display:block;width:100%;padding:18px;background:var(--gold);color:var(--black);font-family:'Bebas Neue',sans-serif;font-size:clamp(20px,5.5vw,26px);letter-spacing:3px;border:none;border-radius:14px;cursor:pointer;transition:transform .1s,box-shadow .2s;box-shadow:0 6px 30px rgba(255,238,4,.3);margin-top:4px}
+    .submit-btn:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 10px 40px rgba(255,238,4,.45)}
+    .submit-btn:active:not(:disabled){transform:translateY(0)}
+    .submit-btn:disabled{background:#2a2a2a;color:#555;cursor:not-allowed;box-shadow:none}
 
-    .divider {
-      width: 60px; height: 3px;
-      background: var(--gold);
-      margin: 16px auto;
-    }
+    /* ── Ticket ── */
+    #my-ticket-section{display:none;margin-top:0}
+    .ticket-card{background:#000;border:2px solid var(--gold);border-radius:16px;padding:22px 20px;text-align:center;position:relative;overflow:hidden}
+    .ticket-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,transparent,var(--gold),transparent)}
+    .ticket-label{font-family:'Oswald',sans-serif;font-size:10px;letter-spacing:3px;color:rgba(255,238,4,.6);text-transform:uppercase;margin-bottom:4px}
+    .my-number{font-family:'Bebas Neue',sans-serif;font-size:clamp(72px,20vw,108px);color:var(--gold);line-height:1;letter-spacing:6px;text-shadow:0 0 40px rgba(255,238,4,.35)}
 
-    /* Status badge */
-    .status-badge {
-      display: inline-block;
-      font-family: 'Oswald', sans-serif;
-      font-size: 13px;
-      letter-spacing: 1px;
-      padding: 6px 16px;
-      border-radius: 99px;
-      margin-bottom: 8px;
-    }
-    .status-badge.open   { background: rgba(0,200,80,0.15); color: #00e066; border: 1px solid #00e06640; }
-    .status-badge.closed { background: rgba(255,50,50,0.15); color: #ff4444; border: 1px solid #ff444440; }
+    .guest-info-row{display:flex;justify-content:center;gap:16px;margin-top:8px;flex-wrap:wrap}
+    .guest-chip{font-family:'Oswald',sans-serif;font-size:13px;color:rgba(255,255,255,.55);letter-spacing:.5px;background:rgba(255,255,255,.06);padding:4px 12px;border-radius:99px}
+    .guest-chip strong{color:#fff}
 
-    /* Main card */
-    .card {
-      background: var(--gray);
-      border: 1px solid rgba(255,238,4,0.15);
-      border-radius: 20px;
-      width: 100%;
-      max-width: 480px;
-      padding: 32px 28px;
-      margin-top: 8px;
-    }
+    .wait-info{margin-top:10px;font-family:'Oswald',sans-serif;font-size:14px;color:rgba(255,255,255,.55);letter-spacing:.5px}
+    .wait-info strong{color:#fff;font-size:19px}
 
-    .card-label {
-      font-family: 'Oswald', sans-serif;
-      font-size: 11px;
-      letter-spacing: 3px;
-      color: rgba(255,255,255,0.4);
-      text-transform: uppercase;
-      text-align: center;
-      margin-bottom: 8px;
-    }
+    #eta-block{display:none;margin-top:14px;background:rgba(255,238,4,.06);border:1px solid rgba(255,238,4,.2);border-radius:12px;padding:14px 16px}
+    .eta-label{font-family:'Oswald',sans-serif;font-size:10px;letter-spacing:3px;color:rgba(255,238,4,.55);text-transform:uppercase;margin-bottom:6px}
+    #eta-display{font-family:'Bebas Neue',sans-serif;font-size:clamp(30px,9vw,42px);color:var(--gold);letter-spacing:2px;line-height:1;margin-bottom:10px}
+    .eta-bar-track{height:6px;background:rgba(255,255,255,.08);border-radius:99px;overflow:hidden}
+    #eta-bar-fill{height:100%;width:0%;border-radius:99px;background:var(--gold);transition:width 1s linear,background 1.5s linear}
+    .eta-note{margin-top:7px;font-size:10px;color:rgba(255,255,255,.22);font-family:'Inter',sans-serif}
 
-    .current-block {
-      text-align: center;
-      background: rgba(0,0,0,0.4);
-      border-radius: 14px;
-      padding: 20px 16px;
-      margin-bottom: 24px;
-      border: 1px solid rgba(255,255,255,0.06);
-    }
+    #your-turn-banner{display:none;align-items:center;justify-content:center;gap:10px;margin-top:14px;background:var(--gold);color:var(--black);border-radius:10px;padding:14px 20px;font-family:'Bebas Neue',sans-serif;font-size:clamp(18px,5vw,22px);letter-spacing:2px;animation:pulse 1s infinite}
+    @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,238,4,.4)}50%{box-shadow:0 0 0 12px rgba(255,238,4,0)}}
 
-    .current-number {
-      font-family: 'Bebas Neue', sans-serif;
-      font-size: clamp(64px, 18vw, 96px);
-      color: #fff;
-      line-height: 1;
-      letter-spacing: 4px;
-    }
-
-    /* Take number button */
-    .take-btn {
-      display: block;
-      width: 100%;
-      padding: 20px;
-      background: var(--gold);
-      color: var(--black);
-      font-family: 'Bebas Neue', sans-serif;
-      font-size: clamp(22px, 6vw, 28px);
-      letter-spacing: 3px;
-      border: none;
-      border-radius: 14px;
-      cursor: pointer;
-      transition: transform 0.1s, box-shadow 0.2s;
-      box-shadow: 0 6px 30px rgba(255,238,4,0.3);
-    }
-    .take-btn:hover:not(:disabled) {
-      transform: translateY(-2px);
-      box-shadow: 0 10px 40px rgba(255,238,4,0.45);
-    }
-    .take-btn:active:not(:disabled) { transform: translateY(0); }
-    .take-btn:disabled {
-      background: #333;
-      color: #666;
-      cursor: not-allowed;
-      box-shadow: none;
-    }
-
-    .closed-msg {
-      text-align: center;
-      margin-top: 16px;
-      font-family: 'Oswald', sans-serif;
-      color: #ff4444;
-      font-size: 14px;
-      letter-spacing: 1px;
-      display: none;
-    }
-
-    /* My ticket */
-    #my-ticket-section {
-      display: none;
-      margin-top: 20px;
-    }
-
-    .ticket-card {
-      background: var(--black);
-      border: 2px solid var(--gold);
-      border-radius: 16px;
-      padding: 24px 20px;
-      text-align: center;
-      position: relative;
-      overflow: hidden;
-    }
-
-    .ticket-card::before {
-      content: '';
-      position: absolute;
-      top: 0; left: 0; right: 0;
-      height: 3px;
-      background: linear-gradient(90deg, transparent, var(--gold), transparent);
-    }
-
-    .ticket-label {
-      font-family: 'Oswald', sans-serif;
-      font-size: 11px;
-      letter-spacing: 3px;
-      color: rgba(255,238,4,0.6);
-      text-transform: uppercase;
-      margin-bottom: 6px;
-    }
-
-    .my-number {
-      font-family: 'Bebas Neue', sans-serif;
-      font-size: clamp(72px, 20vw, 110px);
-      color: var(--gold);
-      line-height: 1;
-      letter-spacing: 6px;
-      text-shadow: 0 0 40px rgba(255,238,4,0.4);
-    }
-
-    .wait-info {
-      margin-top: 12px;
-      font-family: 'Oswald', sans-serif;
-      font-size: 15px;
-      color: rgba(255,255,255,0.6);
-      letter-spacing: 0.5px;
-    }
-
-    .wait-info strong {
-      color: #fff;
-      font-size: 20px;
-    }
-
-    /* Your turn banner */
-    #your-turn-banner {
-      display: none;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-      margin-top: 14px;
-      background: var(--gold);
-      color: var(--black);
-      border-radius: 10px;
-      padding: 14px 20px;
-      font-family: 'Bebas Neue', sans-serif;
-      font-size: clamp(18px, 5vw, 22px);
-      letter-spacing: 2px;
-      animation: pulse 1s infinite;
-    }
-
-    @keyframes pulse {
-      0%, 100% { box-shadow: 0 0 0 0 rgba(255,238,4,0.4); }
-      50%       { box-shadow: 0 0 0 12px rgba(255,238,4,0); }
-    }
-
-    /* Note */
-    .note {
-      text-align: center;
-      margin-top: 20px;
-      font-size: 12px;
-      color: rgba(255,255,255,0.25);
-      line-height: 1.6;
-    }
-
-    /* Confetti */
-    .confetti-piece {
-      position: fixed;
-      top: -10px;
-      animation: confetti-fall linear forwards;
-      pointer-events: none;
-      z-index: 999;
-    }
-    @keyframes confetti-fall {
-      from { transform: translateY(-10px) rotate(0deg); opacity: 1; }
-      to   { transform: translateY(100vh) rotate(720deg); opacity: 0; }
-    }
-
-    /* Footer */
-    .footer {
-      margin-top: 32px;
-      font-family: 'Oswald', sans-serif;
-      font-size: 11px;
-      letter-spacing: 2px;
-      color: rgba(255,255,255,0.15);
-      text-align: center;
-    }
+    .note{text-align:center;margin-top:18px;font-size:11px;color:rgba(255,255,255,.2);line-height:1.7}
+    .footer{margin-top:28px;font-family:'Oswald',sans-serif;font-size:10px;letter-spacing:2px;color:rgba(255,255,255,.1);text-align:center}
+    .confetti-piece{position:fixed;top:-10px;animation:confetti-fall linear forwards;pointer-events:none;z-index:999}
+    @keyframes confetti-fall{from{transform:translateY(-10px) rotate(0deg);opacity:1}to{transform:translateY(100vh) rotate(720deg);opacity:0}}
   </style>
 </head>
 <body>
-
   <div class="header">
     <div class="logo-text">BOSS</div>
     <div class="sub-text">Coffee &amp; Kitchen · Since 2021</div>
@@ -392,38 +268,72 @@
   </div>
 
   <div class="card">
+    <!-- Số đang phục vụ -->
     <div class="current-block">
       <div class="card-label">Đang phục vụ số</div>
       <div class="current-number" id="current-number">00</div>
     </div>
 
-    <button class="take-btn" id="take-btn" onclick="takeNumber()">
-      🎫 &nbsp;LẤY SỐ THỨ TỰ
-    </button>
-    <div class="closed-msg" id="closed-msg">
-      ⚠️ Quán tạm ngừng nhận số mới. Vui lòng thử lại sau!
+    <!-- Form nhập thông tin -->
+    <div id="form-section">
+      <div class="form-title">Thông tin của bạn</div>
+
+      <div class="field">
+        <label class="field-label" for="inp-name">👤 Tên</label>
+        <input id="inp-name" type="text" placeholder="Nhập tên của bạn" autocomplete="name" />
+      </div>
+
+      <div class="field">
+        <label class="field-label" for="inp-phone">📱 Số điện thoại</label>
+        <input id="inp-phone" type="tel" placeholder="0901 234 567" autocomplete="tel" onkeydown="handleEnter(event)" />
+      </div>
+
+      <div class="field">
+        <label class="field-label" for="inp-pax">👥 Số lượng người</label>
+        <select id="inp-pax">
+          <option value="1">1 người</option>
+          <option value="2">2 người</option>
+          <option value="3">3 người</option>
+          <option value="4">4 người</option>
+          <option value="5">5 người</option>
+          <option value="6">6 người</option>
+          <option value="7">7 người</option>
+          <option value="8">8+ người</option>
+        </select>
+      </div>
+
+      <button class="submit-btn" id="submit-btn" onclick="submitForm()">
+        🎫 &nbsp;LẤY SỐ THỨ TỰ
+      </button>
+      <div class="closed-msg" id="closed-msg">⚠️ Quán tạm ngừng nhận số mới. Vui lòng thử lại sau!</div>
     </div>
 
+    <!-- Vé số sau khi đăng ký -->
     <div id="my-ticket-section">
       <div class="ticket-card">
         <div class="ticket-label">Số của bạn</div>
         <div class="my-number" id="my-number">—</div>
-        <div class="wait-info">
-          Còn <strong id="wait-count">—</strong> số trước bạn
+
+        <div class="guest-info-row">
+          <div class="guest-chip">👤 <strong id="guest-name-display">—</strong></div>
+          <div class="guest-chip">👥 <strong id="guest-pax-display">—</strong></div>
         </div>
-        <div id="your-turn-banner">
-          🎉 &nbsp;ĐẾN LƯỢT BẠN RỒI! &nbsp;🎉
+
+        <div class="wait-info">Còn <strong id="wait-count">—</strong> số trước bạn</div>
+
+        <div id="eta-block">
+          <div class="eta-label">⏱ Ước tính thời gian chờ</div>
+          <div id="eta-display">—</div>
+          <div class="eta-bar-track"><div id="eta-bar-fill"></div></div>
+          <div class="eta-note">Dựa trên tốc độ phục vụ thực tế · tự cập nhật</div>
         </div>
+
+        <div id="your-turn-banner">🎉 &nbsp;ĐẾN LƯỢT BẠN RỒI! &nbsp;🎉</div>
       </div>
     </div>
   </div>
 
-  <p class="note">
-    Giữ trang này mở để nhận thông báo tự động<br />
-    khi đến lượt bạn · Không cần tải lại trang
-  </p>
-
+  <p class="note">Giữ trang này mở để nhận thông báo tự động<br/>khi đến lượt bạn · Không cần tải lại trang</p>
   <div class="footer">BOSS COFFEE & KITCHEN · HỆ THỐNG XẾP HÀNG</div>
-
 </body>
 </html>

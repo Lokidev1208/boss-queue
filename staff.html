@@ -7,7 +7,6 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Oswald:wght@400;600;700&family=Inter:wght@400;500&display=swap" rel="stylesheet" />
 
-  <!-- Firebase -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
     import { getDatabase, ref, onValue, set, get } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
@@ -28,19 +27,29 @@
     const STAFF_PASSWORD = "boss2026";
     // ─────────────────────────────────────────────────────────────
 
+    const DEFAULT_MS = 30 * 60 * 1000;
+
     const app = initializeApp(firebaseConfig);
     const db  = getDatabase(app);
 
-    const stateRef   = ref(db, "queue/state");
-    const counterRef = ref(db, "queue/nextTicket");
-    const currentRef = ref(db, "queue/currentServing");
+    const stateRef    = ref(db, "queue/state");
+    const counterRef  = ref(db, "queue/nextTicket");
+    const currentRef  = ref(db, "queue/currentServing");
+    const avgRef      = ref(db, "queue/avgServeMs");
+    const lastNextRef = ref(db, "queue/lastNextTimestamp");
+    const sampleRef   = ref(db, "queue/sampleCount");
+    const guestsRef   = ref(db, "queue/guests");
 
-    let isOpen = true;
+    let isOpen         = true;
     let currentServing = 0;
-    let nextTicket = 0;
+    let nextTicket     = 0;
+    let avgServeMs     = DEFAULT_MS;
+    let sampleCount    = 0;
+    let lastNextTs     = null;
+    let guestsData     = {};
 
     // ── Login ─────────────────────────────────────────────────────
-    window.checkPassword = function () {
+    window.checkPassword = () => {
       const input = document.getElementById("pw-input").value;
       if (input === STAFF_PASSWORD) {
         document.getElementById("login-screen").style.display = "none";
@@ -52,37 +61,35 @@
         document.getElementById("pw-input").focus();
       }
     };
-
     document.addEventListener("keydown", e => {
-      if (e.key === "Enter" && document.getElementById("login-screen").style.display !== "none") {
+      if (e.key === "Enter" && document.getElementById("login-screen").style.display !== "none")
         window.checkPassword();
-      }
     });
 
-    // ── Live listeners ────────────────────────────────────────────
+    // ── Listeners ─────────────────────────────────────────────────
     function initListeners() {
-      onValue(stateRef, snap => {
-        isOpen = snap.val() !== false;
-        updateToggleUI();
-      });
-
-      onValue(currentRef, snap => {
-        currentServing = snap.val() ?? 0;
-        document.getElementById("current-display").textContent = String(currentServing).padStart(2, "0");
-        updateWaiting();
-      });
-
-      onValue(counterRef, snap => {
-        nextTicket = snap.val() ?? 0;
-        document.getElementById("next-display").textContent = String(nextTicket).padStart(2, "0");
-        updateWaiting();
-      });
+      onValue(stateRef,    s => { isOpen = s.val() !== false; updateToggleUI(); });
+      onValue(counterRef,  s => { nextTicket = s.val() ?? 0; document.getElementById("next-display").textContent = String(nextTicket).padStart(2,"0"); updateWaiting(); });
+      onValue(currentRef,  s => { currentServing = s.val() ?? 0; document.getElementById("current-display").textContent = String(currentServing).padStart(2,"0"); updateWaiting(); renderQueue(); });
+      onValue(avgRef,      s => { if (s.val()) avgServeMs = s.val(); updateAvgDisplay(); });
+      onValue(sampleRef,   s => { sampleCount = s.val() ?? 0; updateAvgDisplay(); });
+      onValue(lastNextRef, s => { lastNextTs = s.val() ?? null; });
+      onValue(guestsRef,   s => { guestsData = s.val() ?? {}; renderQueue(); });
     }
 
     function updateWaiting() {
-      const waiting = Math.max(0, nextTicket - currentServing);
-      document.getElementById("waiting-count").textContent = waiting;
-      document.getElementById("next-btn").disabled = waiting === 0;
+      const w = Math.max(0, nextTicket - currentServing);
+      document.getElementById("waiting-count").textContent = w;
+      document.getElementById("next-btn").disabled = w === 0;
+    }
+
+    function updateAvgDisplay() {
+      const mins = Math.round(avgServeMs / 60000);
+      document.getElementById("avg-display").textContent = `~${mins} phút`;
+      document.getElementById("sample-display").textContent =
+        sampleCount < 3
+          ? `(mặc định 30 phút · cần thêm ${3 - sampleCount} lần bấm)`
+          : `(học từ ${sampleCount} lần phục vụ)`;
     }
 
     function updateToggleUI() {
@@ -101,311 +108,196 @@
       }
     }
 
-    // ── Actions ───────────────────────────────────────────────────
-    window.nextNumber = async function () {
+    // ── Render queue list ─────────────────────────────────────────
+    function renderQueue() {
+      const list = document.getElementById("queue-list");
+      const empty = document.getElementById("queue-empty");
+
+      // Collect tickets > currentServing (still waiting), sorted ascending
+      const waiting = Object.values(guestsData)
+        .filter(g => g.ticket > currentServing)
+        .sort((a, b) => a.ticket - b.ticket);
+
+      // Also show "currently serving" row if exists
+      const serving = guestsData[currentServing];
+
+      list.innerHTML = "";
+
+      if (!serving && waiting.length === 0) {
+        empty.style.display = "block";
+        return;
+      }
+      empty.style.display = "none";
+
+      // Currently serving card
+      if (serving) {
+        list.innerHTML += buildRow(serving, true);
+      }
+
+      // Waiting rows
+      waiting.forEach((g, i) => {
+        list.innerHTML += buildRow(g, false, i);
+      });
+    }
+
+    function buildRow(g, isServing, idx) {
+      const timeStr = g.time ? formatTime(g.time) : "—";
+      const badge = isServing
+        ? `<span class="q-badge serving">🍽 Đang phục vụ</span>`
+        : `<span class="q-badge waiting">⏳ Chờ</span>`;
+      const rowClass = isServing ? "q-row serving-row" : (idx === 0 ? "q-row next-row" : "q-row");
+      return `
+        <div class="${rowClass}">
+          <div class="q-num">${String(g.ticket).padStart(2,"0")}</div>
+          <div class="q-info">
+            <div class="q-name">${escHtml(g.name)} ${badge}</div>
+            <div class="q-meta">📱 ${escHtml(g.phone)} &nbsp;·&nbsp; 👥 ${g.pax} người &nbsp;·&nbsp; 🕐 ${timeStr}</div>
+          </div>
+        </div>`;
+    }
+
+    function formatTime(ts) {
+      const d = new Date(ts);
+      return d.getHours().toString().padStart(2,"0") + ":" + d.getMinutes().toString().padStart(2,"0");
+    }
+
+    function escHtml(s) {
+      return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    // ── Next number ───────────────────────────────────────────────
+    window.nextNumber = async () => {
       const ticketSnap = await get(counterRef);
       const total = ticketSnap.val() ?? 0;
-      if (currentServing < total) {
-        await set(currentRef, currentServing + 1);
-        flash("next-btn");
+      if (currentServing >= total) return;
+
+      const now = Date.now();
+      if (lastNextTs) {
+        const elapsed = now - lastNextTs;
+        if (elapsed > 30_000 && elapsed < 3 * 60 * 60 * 1000) {
+          const cappedCount = Math.min(sampleCount, 20);
+          const newAvg = Math.round((avgServeMs * cappedCount + elapsed) / (cappedCount + 1));
+          await set(avgRef, newAvg);
+          await set(sampleRef, sampleCount + 1);
+        }
       }
+      await set(lastNextRef, now);
+      await set(currentRef, currentServing + 1);
+      flash("next-btn");
     };
 
-    window.toggleQueue = async function () {
-      await set(stateRef, !isOpen);
-    };
+    window.toggleQueue = async () => { await set(stateRef, !isOpen); };
 
-    window.resetQueue = async function () {
-      if (!confirm("Reset toàn bộ hàng chờ? Hành động này không thể hoàn tác!")) return;
+    window.resetQueue = async () => {
+      if (!confirm("Reset toàn bộ hàng chờ? Danh sách khách sẽ bị xóa.")) return;
       await set(currentRef, 0);
       await set(counterRef, 0);
+      await set(lastNextRef, null);
+      await set(guestsRef, null);
       flash("reset-btn");
+    };
+
+    window.resetAvg = async () => {
+      if (!confirm("Reset thời gian trung bình về 30 phút?")) return;
+      await set(avgRef, DEFAULT_MS);
+      await set(sampleRef, 0);
     };
 
     function flash(id) {
       const el = document.getElementById(id);
       el.style.transform = "scale(0.95)";
-      setTimeout(() => { el.style.transform = ""; }, 150);
+      setTimeout(() => el.style.transform = "", 150);
     }
   </script>
 
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    :root{--gold:#ffee04;--black:#000;--dark:#0d0d0d;--gray:#1a1a1a;--gray2:#242424}
+    body{background:var(--dark);color:#fff;font-family:'Inter',sans-serif;min-height:100vh;position:relative;overflow-x:hidden}
+    body::before{content:'';position:fixed;inset:0;background-image:repeating-linear-gradient(45deg,transparent,transparent 40px,rgba(255,238,4,.015) 40px,rgba(255,238,4,.015) 80px);pointer-events:none}
 
-    :root {
-      --gold:  #ffee04;
-      --black: #000000;
-      --dark:  #0d0d0d;
-      --gray:  #1a1a1a;
-      --gray2: #242424;
-    }
+    /* ── Login ── */
+    #login-screen{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px}
+    .login-box{background:var(--gray);border:1px solid rgba(255,238,4,.2);border-radius:20px;padding:40px 32px;width:100%;max-width:380px;text-align:center}
+    .login-logo{font-family:'Bebas Neue',sans-serif;font-size:52px;color:var(--gold);letter-spacing:4px}
+    .login-sub{font-family:'Oswald',sans-serif;font-size:11px;letter-spacing:3px;color:rgba(255,255,255,.4);margin-bottom:32px;text-transform:uppercase}
+    .login-label{font-family:'Oswald',sans-serif;font-size:12px;letter-spacing:2px;color:rgba(255,255,255,.5);text-transform:uppercase;margin-bottom:10px;text-align:left}
+    #pw-input{width:100%;background:var(--black);border:1px solid rgba(255,238,4,.2);border-radius:10px;color:#fff;font-family:'Oswald',sans-serif;font-size:18px;letter-spacing:4px;padding:14px 16px;outline:none;text-align:center;transition:border-color .2s}
+    #pw-input:focus{border-color:var(--gold)}
+    #pw-error{display:none;color:#ff4444;font-size:13px;margin-top:10px;font-family:'Oswald',sans-serif;letter-spacing:1px}
+    .login-btn{margin-top:20px;width:100%;padding:16px;background:var(--gold);color:var(--black);font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:3px;border:none;border-radius:10px;cursor:pointer;transition:opacity .2s}
+    .login-btn:hover{opacity:.9}
 
-    body {
-      background: var(--dark);
-      color: #fff;
-      font-family: 'Inter', sans-serif;
-      min-height: 100vh;
-      position: relative;
-      overflow-x: hidden;
-    }
-
-    body::before {
-      content: '';
-      position: fixed; inset: 0;
-      background-image:
-        repeating-linear-gradient(45deg, transparent, transparent 40px, rgba(255,238,4,0.015) 40px, rgba(255,238,4,0.015) 80px);
-      pointer-events: none;
-    }
-
-    /* ─── Login screen ─────────────────────────────────────────── */
-    #login-screen {
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 24px;
-    }
-
-    .login-box {
-      background: var(--gray);
-      border: 1px solid rgba(255,238,4,0.2);
-      border-radius: 20px;
-      padding: 40px 32px;
-      width: 100%;
-      max-width: 380px;
-      text-align: center;
-    }
-
-    .login-logo {
-      font-family: 'Bebas Neue', sans-serif;
-      font-size: 52px;
-      color: var(--gold);
-      letter-spacing: 4px;
-    }
-
-    .login-sub {
-      font-family: 'Oswald', sans-serif;
-      font-size: 11px;
-      letter-spacing: 3px;
-      color: rgba(255,255,255,0.4);
-      margin-bottom: 32px;
-      text-transform: uppercase;
-    }
-
-    .login-label {
-      font-family: 'Oswald', sans-serif;
-      font-size: 12px;
-      letter-spacing: 2px;
-      color: rgba(255,255,255,0.5);
-      text-transform: uppercase;
-      margin-bottom: 10px;
-      text-align: left;
-    }
-
-    #pw-input {
-      width: 100%;
-      background: var(--black);
-      border: 1px solid rgba(255,238,4,0.2);
-      border-radius: 10px;
-      color: #fff;
-      font-family: 'Oswald', sans-serif;
-      font-size: 18px;
-      letter-spacing: 4px;
-      padding: 14px 16px;
-      outline: none;
-      text-align: center;
-      transition: border-color 0.2s;
-    }
-    #pw-input:focus { border-color: var(--gold); }
-
-    #pw-error {
-      display: none;
-      color: #ff4444;
-      font-size: 13px;
-      margin-top: 10px;
-      font-family: 'Oswald', sans-serif;
-      letter-spacing: 1px;
-    }
-
-    .login-btn {
-      margin-top: 20px;
-      width: 100%;
-      padding: 16px;
-      background: var(--gold);
-      color: var(--black);
-      font-family: 'Bebas Neue', sans-serif;
-      font-size: 20px;
-      letter-spacing: 3px;
-      border: none;
-      border-radius: 10px;
-      cursor: pointer;
-      transition: opacity 0.2s;
-    }
-    .login-btn:hover { opacity: 0.9; }
-
-    /* ─── Staff panel ──────────────────────────────────────────── */
-    #staff-panel {
-      display: none;
-      flex-direction: column;
-      align-items: center;
-      padding: 24px 16px 48px;
-      min-height: 100vh;
-    }
-
-    .panel-header {
-      width: 100%;
-      max-width: 560px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 24px;
-    }
-
-    .panel-title {
-      font-family: 'Bebas Neue', sans-serif;
-      font-size: 28px;
-      color: var(--gold);
-      letter-spacing: 3px;
-    }
-
-    .panel-sub {
-      font-family: 'Oswald', sans-serif;
-      font-size: 11px;
-      letter-spacing: 2px;
-      color: rgba(255,255,255,0.35);
-      text-transform: uppercase;
-    }
-
-    .state-badge {
-      font-family: 'Oswald', sans-serif;
-      font-size: 12px;
-      letter-spacing: 1px;
-      padding: 6px 14px;
-      border-radius: 99px;
-    }
-    .state-badge.open   { background: rgba(0,200,80,0.15); color: #00e066; border: 1px solid #00e06640; }
-    .state-badge.closed { background: rgba(255,50,50,0.15); color: #ff4444; border: 1px solid #ff444440; }
+    /* ── Staff panel ── */
+    #staff-panel{display:none;flex-direction:column;align-items:center;padding:24px 16px 48px;min-height:100vh}
+    .panel-header{width:100%;max-width:600px;display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+    .panel-title{font-family:'Bebas Neue',sans-serif;font-size:28px;color:var(--gold);letter-spacing:3px}
+    .panel-sub{font-family:'Oswald',sans-serif;font-size:11px;letter-spacing:2px;color:rgba(255,255,255,.3);text-transform:uppercase}
+    .state-badge{font-family:'Oswald',sans-serif;font-size:12px;letter-spacing:1px;padding:6px 14px;border-radius:99px}
+    .state-badge.open{background:rgba(0,200,80,.15);color:#00e066;border:1px solid rgba(0,224,102,.25)}
+    .state-badge.closed{background:rgba(255,50,50,.15);color:#ff4444;border:1px solid rgba(255,68,68,.25)}
 
     /* Stats */
-    .stats-row {
-      width: 100%;
-      max-width: 560px;
-      display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: 12px;
-      margin-bottom: 20px;
-    }
+    .stats-row{width:100%;max-width:600px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:14px}
+    .stat-card{background:var(--gray);border:1px solid rgba(255,238,4,.1);border-radius:14px;padding:16px 12px;text-align:center}
+    .stat-label{font-family:'Oswald',sans-serif;font-size:10px;letter-spacing:2px;color:rgba(255,255,255,.3);text-transform:uppercase;margin-bottom:6px}
+    .stat-value{font-family:'Bebas Neue',sans-serif;font-size:clamp(34px,9vw,52px);line-height:1;letter-spacing:2px}
+    .stat-value.gold{color:var(--gold)} .stat-value.white{color:#fff} .stat-value.dim{color:rgba(255,255,255,.4)}
 
-    .stat-card {
-      background: var(--gray);
-      border: 1px solid rgba(255,238,4,0.1);
-      border-radius: 14px;
-      padding: 20px 12px;
-      text-align: center;
-    }
+    /* ETA learn */
+    .eta-learn-card{width:100%;max-width:600px;background:var(--gray);border:1px solid rgba(255,238,4,.12);border-radius:14px;padding:14px 18px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .eta-learn-left{flex:1}
+    .eta-learn-title{font-family:'Oswald',sans-serif;font-size:11px;letter-spacing:2px;color:rgba(255,238,4,.55);text-transform:uppercase;margin-bottom:4px}
+    #avg-display{font-family:'Bebas Neue',sans-serif;font-size:26px;color:var(--gold);letter-spacing:2px}
+    #sample-display{font-size:11px;color:rgba(255,255,255,.3);margin-top:2px}
+    .reset-avg-btn{font-family:'Oswald',sans-serif;font-size:11px;letter-spacing:1px;padding:8px 14px;background:transparent;border:1px solid rgba(255,255,255,.12);color:rgba(255,255,255,.35);border-radius:8px;cursor:pointer;white-space:nowrap;transition:all .2s}
+    .reset-avg-btn:hover{border-color:rgba(255,255,255,.3);color:rgba(255,255,255,.6)}
 
-    .stat-label {
-      font-family: 'Oswald', sans-serif;
-      font-size: 10px;
-      letter-spacing: 2px;
-      color: rgba(255,255,255,0.35);
-      text-transform: uppercase;
-      margin-bottom: 8px;
-    }
+    /* Actions */
+    .main-section{width:100%;max-width:600px}
+    .section-title{font-family:'Oswald',sans-serif;font-size:11px;letter-spacing:3px;color:rgba(255,255,255,.25);text-transform:uppercase;margin-bottom:12px}
+    .action-btn{display:block;width:100%;padding:20px;border:none;border-radius:14px;cursor:pointer;font-family:'Bebas Neue',sans-serif;font-size:clamp(20px,5.5vw,28px);letter-spacing:3px;transition:transform .1s,box-shadow .2s,opacity .2s;margin-bottom:12px}
+    .action-btn:active{transform:scale(.97)}
+    .action-btn:disabled{opacity:.25;cursor:not-allowed}
+    .action-btn.primary{background:var(--gold);color:var(--black);box-shadow:0 6px 30px rgba(255,238,4,.3)}
+    .action-btn.primary:hover:not(:disabled){box-shadow:0 10px 40px rgba(255,238,4,.45);transform:translateY(-2px)}
+    .action-btn.danger{background:var(--gray2);color:#ff6b6b;border:1px solid rgba(255,107,107,.3)}
+    .action-btn.danger:hover{background:rgba(255,60,60,.1)}
+    .action-btn.success{background:var(--gray2);color:#00e066;border:1px solid rgba(0,224,102,.3)}
+    .action-btn.success:hover{background:rgba(0,200,80,.1)}
+    .action-btn.reset{background:transparent;color:rgba(255,255,255,.22);border:1px solid rgba(255,255,255,.1);font-size:clamp(13px,3.5vw,17px);padding:13px;letter-spacing:2px}
+    .action-btn.reset:hover{color:rgba(255,255,255,.45);border-color:rgba(255,255,255,.22)}
+    .sep{height:1px;background:rgba(255,255,255,.06);margin:18px 0}
 
-    .stat-value {
-      font-family: 'Bebas Neue', sans-serif;
-      font-size: clamp(36px, 10vw, 56px);
-      line-height: 1;
-      letter-spacing: 2px;
-    }
+    /* ── Queue list ── */
+    .queue-section{width:100%;max-width:600px;margin-top:6px}
+    .queue-section .section-title{margin-bottom:10px}
+    #queue-empty{text-align:center;color:rgba(255,255,255,.2);font-family:'Oswald',sans-serif;font-size:13px;letter-spacing:1px;padding:24px;display:none}
+    #queue-list{display:flex;flex-direction:column;gap:8px}
 
-    .stat-value.gold  { color: var(--gold); }
-    .stat-value.white { color: #fff; }
-    .stat-value.dim   { color: rgba(255,255,255,0.4); }
+    .q-row{background:var(--gray);border:1px solid rgba(255,255,255,.07);border-radius:12px;padding:14px 16px;display:flex;align-items:center;gap:14px;transition:background .2s}
+    .q-row.serving-row{background:rgba(255,238,4,.07);border-color:rgba(255,238,4,.3)}
+    .q-row.next-row{border-color:rgba(255,255,255,.18)}
 
-    /* Main action */
-    .main-section {
-      width: 100%;
-      max-width: 560px;
-    }
+    .q-num{font-family:'Bebas Neue',sans-serif;font-size:32px;letter-spacing:2px;min-width:44px;text-align:center;line-height:1}
+    .serving-row .q-num{color:var(--gold)}
+    .next-row .q-num{color:#fff}
+    .q-row:not(.serving-row):not(.next-row) .q-num{color:rgba(255,255,255,.4)}
 
-    .section-title {
-      font-family: 'Oswald', sans-serif;
-      font-size: 11px;
-      letter-spacing: 3px;
-      color: rgba(255,255,255,0.3);
-      text-transform: uppercase;
-      margin-bottom: 12px;
-    }
+    .q-info{flex:1;min-width:0}
+    .q-name{font-family:'Oswald',sans-serif;font-size:15px;font-weight:600;letter-spacing:.5px;color:#fff;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .q-meta{font-size:12px;color:rgba(255,255,255,.35);margin-top:3px;font-family:'Inter',sans-serif}
 
-    .action-btn {
-      display: block;
-      width: 100%;
-      padding: 22px;
-      border: none;
-      border-radius: 14px;
-      cursor: pointer;
-      font-family: 'Bebas Neue', sans-serif;
-      font-size: clamp(22px, 6vw, 30px);
-      letter-spacing: 3px;
-      transition: transform 0.1s, box-shadow 0.2s, opacity 0.2s;
-      margin-bottom: 12px;
-    }
-    .action-btn:active { transform: scale(0.97); }
-    .action-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+    .q-badge{font-family:'Oswald',sans-serif;font-size:10px;letter-spacing:1px;padding:2px 8px;border-radius:99px}
+    .q-badge.serving{background:rgba(255,238,4,.15);color:var(--gold);border:1px solid rgba(255,238,4,.3)}
+    .q-badge.waiting{background:rgba(255,255,255,.06);color:rgba(255,255,255,.4);border:1px solid rgba(255,255,255,.1)}
 
-    .action-btn.primary {
-      background: var(--gold);
-      color: var(--black);
-      box-shadow: 0 6px 30px rgba(255,238,4,0.3);
-    }
-    .action-btn.primary:hover:not(:disabled) {
-      box-shadow: 0 10px 40px rgba(255,238,4,0.45);
-      transform: translateY(-2px);
-    }
-
-    .action-btn.danger {
-      background: var(--gray2);
-      color: #ff6b6b;
-      border: 1px solid rgba(255,107,107,0.3);
-    }
-    .action-btn.danger:hover { background: rgba(255,60,60,0.12); }
-
-    .action-btn.success {
-      background: var(--gray2);
-      color: #00e066;
-      border: 1px solid rgba(0,224,102,0.3);
-    }
-    .action-btn.success:hover { background: rgba(0,200,80,0.1); }
-
-    .action-btn.reset {
-      background: transparent;
-      color: rgba(255,255,255,0.25);
-      border: 1px solid rgba(255,255,255,0.1);
-      font-size: clamp(14px, 4vw, 18px);
-      padding: 14px;
-      letter-spacing: 2px;
-    }
-    .action-btn.reset:hover { color: rgba(255,255,255,0.5); border-color: rgba(255,255,255,0.25); }
-
-    .sep { height: 1px; background: rgba(255,255,255,0.06); margin: 20px 0; }
-
-    /* Mobile tap hint */
-    .tap-hint {
-      text-align: center;
-      font-size: 12px;
-      color: rgba(255,255,255,0.18);
-      margin-top: 24px;
-      font-family: 'Oswald', sans-serif;
-      letter-spacing: 1px;
-    }
+    .tap-hint{text-align:center;font-size:12px;color:rgba(255,255,255,.14);margin-top:20px;font-family:'Oswald',sans-serif;letter-spacing:1px}
   </style>
 </head>
 <body>
 
-  <!-- Login Screen -->
+  <!-- Login -->
   <div id="login-screen">
     <div class="login-box">
       <div class="login-logo">BOSS</div>
@@ -443,26 +335,34 @@
       </div>
     </div>
 
+    <!-- ETA -->
+    <div class="eta-learn-card">
+      <div class="eta-learn-left">
+        <div class="eta-learn-title">⏱ Thời gian TB mỗi số</div>
+        <div id="avg-display">~30 phút</div>
+        <div id="sample-display">(mặc định · cần thêm 3 lần bấm)</div>
+      </div>
+      <button class="reset-avg-btn" onclick="resetAvg()">Reset TB</button>
+    </div>
+
     <!-- Actions -->
     <div class="main-section">
       <div class="section-title">Hành động</div>
-
-      <button class="action-btn primary" id="next-btn" onclick="nextNumber()">
-        ➡️ &nbsp; GỌI SỐ TIẾP THEO
-      </button>
-
-      <button class="action-btn danger" id="toggle-btn" onclick="toggleQueue()">
-        🔴 TẮT NHẬN SỐ
-      </button>
-
+      <button class="action-btn primary" id="next-btn" onclick="nextNumber()">➡️ &nbsp;GỌI SỐ TIẾP THEO</button>
+      <button class="action-btn danger" id="toggle-btn" onclick="toggleQueue()">🔴 TẮT NHẬN SỐ</button>
       <div class="sep"></div>
-
-      <button class="action-btn reset" id="reset-btn" onclick="resetQueue()">
-        🔄 &nbsp; RESET HÀNG CHỜ (về 0)
-      </button>
+      <button class="action-btn reset" id="reset-btn" onclick="resetQueue()">🔄 &nbsp;RESET HÀNG CHỜ (về 0)</button>
     </div>
 
-    <p class="tap-hint">Nhấn "GỌI SỐ TIẾP THEO" mỗi khi một bàn sẵn sàng</p>
+    <!-- Queue list -->
+    <div class="queue-section">
+      <div class="sep"></div>
+      <div class="section-title">Danh sách hàng chờ</div>
+      <div id="queue-empty">Chưa có khách nào trong hàng chờ</div>
+      <div id="queue-list"></div>
+    </div>
+
+    <p class="tap-hint">Mỗi lần bấm "GỌI SỐ" hệ thống tự học thời gian phục vụ thực tế</p>
   </div>
 
 </body>
